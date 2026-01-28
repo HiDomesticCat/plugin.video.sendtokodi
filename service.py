@@ -63,6 +63,12 @@ def guess_manifest_type(f, url):
         return "rtmp"
     elif protocol == "ism":
         return "ism"
+    
+    # Check for common video extensions first
+    lower_url = url.lower()
+    if lower_url.endswith(('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm')):
+        return None # Let Kodi handle these directly
+
     for s in [".m3u", ".m3u8", ".hls", ".mpd", ".rtmp", ".ism"]:
         offset = url.find(s, 0)
         while offset != -1:
@@ -177,9 +183,14 @@ def createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth):
             # Non-adaptive manifests or files on servers:
             if not 'url' in f:
                 continue
-            # TODO: implement support for making/serving global HLS manifests for m3u8 and mp4 urls
+            
+            # Allow direct playback of video files even if audio/video codec info is missing
+            # This is common for direct MP4 links
             if (have_video and vcodec == "none") or (have_audio and acodec == "none"):
-                continue
+                # Check if it's a direct video file, if so, we might want to allow it
+                if not any(f['url'].lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm']):
+                     continue
+
             manifest_type = guess_manifest_type(f, f['url'])
             if manifest_type is not None and not isa_supports(manifest_type):
                 continue
