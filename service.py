@@ -5,17 +5,16 @@ SendToKodi - Ultimate Fallback Strategy
 Automatically tries ALL methods until one works - NO website list needed!
 
 Strategy Waterfall:
-1. Try direct play WITH headers (fastest & most reliable)
-2. If fails → Try yt-dlp best
-3. If fails → Try yt-dlp alternative format
-4. If fails → Try yt-dlp worst quality (last resort)
-5. Report failure only if ALL methods fail
+1. Direct play WITH headers (fastest & most reliable)
+2. yt-dlp best
+3. yt-dlp alternative format
+4. yt-dlp worst quality (last resort)
+5. Special handling for protected sites like anime1.me (force yt-dlp first)
 
 NO HARDCODED WEBSITE LISTS - Works for ANY site automatically!
 """
 
 import sys
-import os
 from urllib.parse import urlparse, unquote
 import xbmc
 import xbmcgui
@@ -89,7 +88,7 @@ def convert_nextcloud_to_direct(url):
 
 
 def is_webdav_url(url):
-    return url.startswith('webdav://') or url.startswith('webdavs://')
+    return url.startswith('webдав://') or url.startswith('webdavs://')
 
 
 def convert_webdav_to_https(url):
@@ -108,7 +107,7 @@ def get_universal_headers(url):
     scheme = parsed.scheme
     
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
         'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
         'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7,ja;q=0.6',
         'Accept-Encoding': 'gzip, deflate, br',
@@ -121,9 +120,14 @@ def get_universal_headers(url):
     }
     
     if domain:
-        base_url = f"{scheme}://{domain}/"
-        headers['Referer'] = base_url
-        headers['Origin'] = base_url.rstrip('/')
+        # 針對 anime1.me 特殊處理（熱連結保護）
+        if 'anime1.me' in domain:
+            headers['Referer'] = 'https://anime1.me/'
+            headers['Origin'] = 'https://anime1.me'
+        else:
+            base_url = f"{scheme}://{domain}/"
+            headers['Referer'] = base_url
+            headers['Origin'] = base_url.rstrip('/')
     
     header_str = '&'.join([f'{k}={v}' for k, v in headers.items()])
     return header_str
@@ -156,7 +160,6 @@ def get_mime_type(url):
 def create_listitem(url, with_headers=False, title=None):
     """Create ListItem with optional headers"""
     
-    # Add headers if requested
     if with_headers and '|' not in url:
         headers = get_universal_headers(url)
         url_with_headers = f"{url}|{headers}"
@@ -173,20 +176,17 @@ def create_listitem(url, with_headers=False, title=None):
     url_base = url.split('|')[0]
     url_lower = url_base.lower()
     
-    # HLS
     if '.m3u8' in url_lower:
         list_item.setProperty('inputstream', 'inputstream.adaptive')
         list_item.setProperty('inputstream.adaptive.manifest_type', 'hls')
         list_item.setMimeType('application/vnd.apple.mpegurl')
         list_item.setProperty('inputstream.adaptive.manifest_update_parameter', 'full')
     
-    # DASH
     elif '.mpd' in url_lower:
         list_item.setProperty('inputstream', 'inputstream.adaptive')
         list_item.setProperty('inputstream.adaptive.manifest_type', 'mpd')
         list_item.setMimeType('application/dash+xml')
     
-    # Standard files
     else:
         mime_type = get_mime_type(url_base)
         if mime_type:
@@ -202,23 +202,14 @@ def create_listitem(url, with_headers=False, title=None):
 # ============================================================
 
 def get_ytdlp_module():
-    """Import yt-dlp or youtube-do"""
     try:
-        if sys.version_info[0] >= 3 and sys.version_info[1] >= 6:
-            from lib.yt_dlp import YoutubeDL
-            return YoutubeDL
-        else:
-            from lib.youtube_dl import YoutubeDL
-            return YoutubeDL
+        from lib.yt_dlp import YoutubeDL
+        return YoutubeDL
     except ImportError:
         return None
 
 
 def try_ytdlp(url, format_preference='best'):
-    """
-    Try to extract with yt-dlp
-    Returns: ListItem or None
-    """
     YoutubeDL = get_ytdlp_module()
     if not YoutubeDL:
         log("yt-dlp not available")
@@ -227,21 +218,30 @@ def try_ytdlp(url, format_preference='best'):
     try:
         log(f"Trying yt-dlp with format: {format_preference}")
         
+        # 基礎 yt-dlp 選項
         ydl_opts = {
             'quiet': True,
             'no_warnings': True,
             'ignoreerrors': False,
             'nocheckcertificate': True,
             'format': format_preference,
+            'http_headers': {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+                'Referer': 'https://anime1.me' in url.lower() and 'https://anime1.me/' or get_universal_headers(url).split('Referer=')[1].split('&')[0] if 'Referer=' in get_universal_headers(url) else '',
+            },
         }
         
+        # 針對 anime1.me 強制 Referer
+        parsed = urlparse(url)
+        if 'anime1.me' in parsed.netloc.lower():
+            ydl_opts['http_headers']['Referer'] = 'https://anime1.me/'
+
         with YoutubeDL(ydl_opts) as ydl:
             result = ydl.extract_info(url, download=False)
             
             if not result:
                 return None
             
-            # Extract URL
             if 'url' in result:
                 extracted_url = result['url']
             elif 'formats' in result and len(result['formats']) > 0:
@@ -249,7 +249,6 @@ def try_ytdlp(url, format_preference='best'):
             else:
                 return None
             
-            # Log what we got
             if '.m3u8' in extracted_url:
                 log("✓ yt-dlp extracted m3u8!")
             elif '.mpd' in extracted_url:
@@ -257,10 +256,9 @@ def try_ytdlp(url, format_preference='best'):
             else:
                 log(f"yt-dlp extracted: {extracted_url[:50]}...")
             
-            # Get title if available
             title = result.get('title', None)
             
-            # Create ListItem - 強制加上 headers
+            # 強制加 headers（確保提取後也能過保護）
             return create_listitem(extracted_url, with_headers=True, title=title)
     
     except Exception as e:
@@ -273,11 +271,6 @@ def try_ytdlp(url, format_preference='best'):
 # ============================================================
 
 def process_url_with_fallback(url):
-    """
-    ULTIMATE FALLBACK STRATEGY - 優化版
-    """
-    
-    # Clean URL
     url = convert_nextcloud_to_direct(url)
     url = convert_webdav_to_https(url)
     
@@ -285,12 +278,24 @@ def process_url_with_fallback(url):
     log(f"URL: {url[:100]}...")
     log("Starting optimized fallback waterfall...")
     
-    # Check if direct media
+    parsed_url = urlparse(url)
     is_direct = is_direct_media_url(url)
     
-    # ========================================
-    # METHOD 1: Direct play WITH headers (最快、最可靠)
-    # ========================================
+    # 針對 anime1.me 強制先用 yt-dlp（熱連結保護）
+    if 'anime1.me' in parsed_url.netloc.lower():
+        log("Detected anime1.me - Forcing yt-dlp first to bypass hotlink protection...")
+        listitem = try_ytdlp(url, format_preference='best')
+        if listitem:
+            log("✓ SUCCESS: anime1.me bypassed via yt-dlp best")
+            showInfoNotification("Playing anime1.me (yt-dlp bypass)")
+            return listitem
+        listitem = try_ytdlp(url, format_preference='bestvideo+bestaudio/best')
+        if listitem:
+            log("✓ SUCCESS: anime1.me bypassed via yt-dlp alt")
+            showInfoNotification("Playing anime1.me (yt-dlp alt)")
+            return listitem
+
+    # METHOD 1: Direct play WITH headers
     if is_direct:
         log("Method 1: Trying direct play WITH headers...")
         try:
@@ -301,45 +306,30 @@ def process_url_with_fallback(url):
         except Exception as e:
             log(f"✗ Method 1 failed: {e}")
     
-    # ========================================
-    # METHOD 2: yt-dlp best (會自動帶 headers)
-    # ========================================
+    # METHOD 2: yt-dlp best
     log("Method 2: Trying yt-dlp best...")
     listitem = try_ytdlp(url, format_preference='best')
     if listitem:
         log("✓ Method 2 SUCCESS: yt-dlp best")
         showInfoNotification("Playing (yt-dlp best)")
         return listitem
-    else:
-        log("✗ Method 2 failed")
     
-    # ========================================
-    # METHOD 3: yt-dlp alternative format
-    # ========================================
-    log("Method 3: Trying yt-dlp alternative format...")
+    # METHOD 3: yt-dlp alternative
+    log("Method 3: Trying yt-dlp alternative...")
     listitem = try_ytdlp(url, format_preference='bestvideo+bestaudio/best')
     if listitem:
-        log("✓ Method 3 SUCCESS: yt-dlp alternative")
+        log("✓ Method 3 SUCCESS: yt-dlp alt")
         showInfoNotification("Playing (yt-dlp alt)")
         return listitem
-    else:
-        log("✗ Method 3 failed")
     
-    # ========================================
-    # METHOD 4: yt-dlp worst quality (last resort)
-    # ========================================
-    log("Method 4: Trying yt-dlp worst quality...")
+    # METHOD 4: yt-dlp worst
+    log("Method 4: Trying yt-dlp worst...")
     listitem = try_ytdlp(url, format_preference='worst')
     if listitem:
         log("✓ Method 4 SUCCESS: yt-dlp worst")
         showInfoNotification("Playing (low quality)")
         return listitem
-    else:
-        log("✗ Method 4 failed")
     
-    # ========================================
-    # ALL METHODS FAILED
-    # ========================================
     log("✗✗✗ ALL METHODS FAILED ✗✗✗")
     log("=" * 60)
     return None
@@ -352,7 +342,7 @@ def process_url_with_fallback(url):
 if __name__ == '__main__':
     try:
         log("=" * 60)
-        log("SendToKodi - Ultimate Fallback (Optimized)")
+        log("SendToKodi - Ultimate Fallback (Optimized + anime1.me support)")
         log("=" * 60)
         
         if len(sys.argv) < 3:
@@ -369,7 +359,6 @@ if __name__ == '__main__':
             xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
             sys.exit(1)
         
-        # Try all methods
         listitem = process_url_with_fallback(url)
         
         if listitem:
