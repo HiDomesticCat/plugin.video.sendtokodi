@@ -1,404 +1,548 @@
+#!/usr/bin/env python
 # -*- coding: utf-8 -*-
+"""
+SendToKodi - Enhanced Service
+Plays various stream sites on Kodi using yt-dlp with direct media support
+
+Features:
+- Direct media file support (mp4, mkv, avi, etc.)
+- Automatic Nextcloud share URL conversion
+- WebDAV protocol support
+- Improved seeking/fast-forward support
+- HLS and DASH manifest support
+- Fallback to yt-dlp for complex URLs
+"""
+
 import sys
 import os
-import json
+import re
+from urllib.parse import urlparse, unquote, parse_qs
 import xbmc
-import xbmcaddon
 import xbmcgui
 import xbmcplugin
-from urllib.parse import urlparse, parse_qs, urlencode
-import traceback
+import xbmcaddon
 
-class replacement_stderr(sys.stderr.__class__):
-    def isatty(self): return False
+# Get addon settings
+__addon__ = xbmcaddon.Addon()
+__handle__ = int(sys.argv[1])
 
-def debug(content):
-    log(content, xbmc.LOGDEBUG)
+# Supported direct media file extensions
+DIRECT_MEDIA_EXTENSIONS = (
+    # Video formats
+    '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v',
+    '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.vob',
+    # Audio formats
+    '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma', '.opus',
+    # Streaming formats
+    '.m3u8', '.mpd'
+)
 
-def notice(content):
-    log(content, xbmc.LOGINFO)
 
-def log(msg, level=xbmc.LOGINFO):
-    addon = xbmcaddon.Addon()
-    addonID = addon.getAddonInfo('id')
-    xbmc.log('%s: %s' % (addonID, msg), level)
+# ============================================================
+# LOGGING AND NOTIFICATIONS
+# ============================================================
 
-def patch_strptime():
-    import datetime
-    #fix for datatetime.strptime returns None
-    class proxydt(datetime.datetime):
-        @staticmethod
-        def strptime(date_string, format):
-            import time
-            return datetime.datetime(*(time.strptime(date_string, format)[0:6]))
-    datetime.datetime = proxydt
+def log(message):
+    """Log message to Kodi log with plugin prefix"""
+    xbmc.log(f"plugin.video.sendtokodi: {message}", xbmc.LOGINFO)
+
+
+def log_error(message):
+    """Log error message to Kodi log"""
+    xbmc.log(f"plugin.video.sendtokodi ERROR: {message}", xbmc.LOGERROR)
+
 
 def showInfoNotification(message):
-    xbmcgui.Dialog().notification("SendToKodi", message, xbmcgui.NOTIFICATION_INFO, 5000)
+    """Show info notification to user"""
+    xbmcgui.Dialog().notification("SendToKodi", message, 
+                                  xbmcgui.NOTIFICATION_INFO, 5000)
+
 
 def showErrorNotification(message):
-    xbmcgui.Dialog().notification("SendToKodi", message, xbmcgui.NOTIFICATION_ERROR, 5000)
+    """Show error notification to user"""
+    xbmcgui.Dialog().notification("SendToKodi", message,
+                                  xbmcgui.NOTIFICATION_ERROR, 5000)
 
-def getParams():
-    result = {}
-    if len(sys.argv) < 3:
-        return result
-    paramstring = sys.argv[2]
-    additionalParamsIndex = paramstring.find(' ')
-    if additionalParamsIndex == -1:
-        result['url'] = paramstring[1:]
-        result['ydlOpts'] = {}
-    else:
-        result['url'] = paramstring[1:additionalParamsIndex]
-        additionalParamsString = paramstring[additionalParamsIndex:]
-        additionalParams = json.loads(additionalParamsString)
-        result['ydlOpts'] = additionalParams['ydlOpts']
-    return result
 
-def guess_manifest_type(f, url):
-    protocol = f.get('protocol', "")
-    if protocol.startswith("m3u"):
-        return "hls"
-    elif protocol.startswith("rtmp") or protocol == "rtsp":
-        return "rtmp"
-    elif protocol == "ism":
-        return "ism"
+# ============================================================
+# URL DETECTION AND CONVERSION
+# ============================================================
+
+def is_direct_media_url(url):
+    """
+    Detect if URL is a direct media file
     
-    # Check for common video extensions first
-    lower_url = url.lower()
-    if lower_url.endswith(('.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm')):
-        return None # Let Kodi handle these directly
-
-    for s in [".m3u", ".m3u8", ".hls", ".mpd", ".rtmp", ".ism"]:
-        offset = url.find(s, 0)
-        while offset != -1:
-            if offset == len(url) - len(s) or not url[offset + len(s)].isalnum():
-                if s.startswith(".m3u"):
-                    s = ".hls"
-                return s[1:]
-            offset = url.find(s, offset + 1)
-    return None
-
-def isa_supports(stream):
+    Args:
+        url: URL string to check
+    
+    Returns:
+        bool: True if URL points to a playable media file
+    """
     try:
-        import inputstreamhelper
-        if stream is None or len(stream) < 1:
-            return False
-        return inputstreamhelper.Helper(stream).check_inputstream()
-    except ImportError:
+        parsed = urlparse(url)
+        path = unquote(parsed.path.lower())
+        
+        # Check file extension in path
+        for ext in DIRECT_MEDIA_EXTENSIONS:
+            if path.endswith(ext):
+                log(f"Detected direct media file: {ext}")
+                return True
+        
+        # Check file extension before query parameters
+        if '?' in url:
+            base_path = url.split('?')[0].lower()
+            for ext in DIRECT_MEDIA_EXTENSIONS:
+                if base_path.endswith(ext):
+                    log(f"Detected direct media file in URL: {ext}")
+                    return True
+        
+        return False
+    except Exception as e:
+        log_error(f"Error checking direct media URL: {e}")
         return False
 
-def createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth):
-    debug(result)
 
-    url = None
-    isa = None
-    headers = None
+def is_nextcloud_share_url(url):
+    """
+    Detect Nextcloud share URLs
+    
+    Args:
+        url: URL string to check
+    
+    Returns:
+        bool: True if URL is a Nextcloud share link
+    """
+    return '/s/' in url and '/download' not in url and '/preview' not in url
 
-    # first try existing manifest
-    manifest_url = result.get('manifest_url') if usemanifest else None
-    if manifest_url is not None and isa_supports(guess_manifest_type(result, manifest_url)):
-        isa = True
-        url = manifest_url
-        headers = result.get('http_headers')
-        log("Picked original manifest")
 
-    # then move on to heuristic format selection
-    if url is None:
-        have_video = False
-        have_audio = False
-        dash_video = []
-        dash_audio = []
-        filtered_format = None
-        all_formats = result.get('formats', [])
-        for f in all_formats:
-            vcodec = f.get('vcodec', "none")
-            acodec = f.get('acodec', "none")
-            if vcodec != "none":
-                have_video = True
-            if acodec != "none":
-                have_audio = True
+def is_webdav_url(url):
+    """
+    Detect WebDAV URLs
+    
+    Args:
+        url: URL string to check
+    
+    Returns:
+        bool: True if URL uses WebDAV protocol
+    """
+    return url.startswith('webdav://') or url.startswith('webdavs://')
 
-            container = f.get('container', "")
-            if vcodec != "none" and acodec == "none" and container in ["mp4_dash", "webm_dash"]:
-                dash_video.append(f)
-            if vcodec == "none" and acodec != "none" and container in ["m4a_dash", "webm_dash"]:
-                dash_audio.append(f)
 
-        # workaround for unknown ISA bug that causes audio to fail when
-        # multiple streams are available, though seemingly only when they have
-        # different sample rates.
-        if len(dash_audio) > 1:
-            dash_audio = [dash_audio[-1]]
+def convert_nextcloud_to_direct(url):
+    """
+    Convert Nextcloud share URL to direct download URL
+    
+    Args:
+        url: Nextcloud share URL
+    
+    Returns:
+        str: Direct download URL
+    
+    Example:
+        Input:  https://cloud.example.com/s/ABC123
+        Output: https://cloud.example.com/s/ABC123/download
+    """
+    if is_nextcloud_share_url(url):
+        direct_url = url.rstrip('/') + '/download'
+        log(f"Converted Nextcloud URL to direct download")
+        return direct_url
+    return url
 
-        # ytdl returns formats from worst to best
-        for f in reversed(all_formats):
-            # assume that manifests are either video+audio regardless of acodec, or audio only
-            vcodec = f.get('vcodec')
-            acodec = f.get('acodec')
-            if (have_video and vcodec == "none") or (not have_video and acodec == "none"):
-                continue
 
-            # Streams with adaptive manifests:
-            # ytdl will sometimes return a manifest_url in individual formats
-            # but not a global one. When this happens it (always?) means that
-            # it's functionally a global manifest.
-            manifest_url = f.get('manifest_url') if usemanifest else None
-            if manifest_url is not None and isa_supports(guess_manifest_type(f, manifest_url)):
-                url = manifest_url
-                isa = True
-                headers = f.get('http_headers')
-                log("Picked format " + f.get('format', "") + " manifest")
-                break
+def convert_webdav_to_https(url):
+    """
+    Convert WebDAV URL to HTTPS URL for better compatibility
+    
+    Args:
+        url: WebDAV URL
+    
+    Returns:
+        str: HTTPS URL
+    
+    Example:
+        Input:  webdav://user:pass@host/path
+        Output: https://user:pass@host/path
+    """
+    if url.startswith('webdav://'):
+        https_url = url.replace('webdav://', 'https://', 1)
+        log("Converted WebDAV to HTTPS")
+        return https_url
+    elif url.startswith('webdavs://'):
+        https_url = url.replace('webdavs://', 'https://', 1)
+        log("Converted WebDAVS to HTTPS")
+        return https_url
+    return url
 
-            # MPEG-DASH streams without adaptive manifest:
-            if usedashbuilder and (not have_video or len(dash_video) > 0) and (not have_audio or len(dash_audio) > 0) and ((have_video and f == dash_video[-1]) or (not have_video and have_audio and f == dash_audio[-1])) and isa_supports("mpd"):
-                import dash_builder
-                builder = dash_builder.Manifest(result.get('duration', "0"))
-                video_success = not have_video
-                audio_success = not have_audio
-                for fvideo in dash_video:
-                    fid = fvideo.get('format', "")
-                    try:
-                        builder.add_video_format(fvideo)
-                        video_success = True
-                        log("Added video stream {} to DASH manifest".format(fid))
-                    except Exception as e:
-                        log("Failed to add DASH video stream {}: {}".format(fid, e))
-                for faudio in dash_audio:
-                    fid = faudio.get('format', "")
-                    try:
-                        builder.add_audio_format(faudio)
-                        audio_success = True
-                        log("Added audio stream {} to DASH manifest".format(fid))
-                    except Exception as e:
-                        log("Failed to add DASH audio stream {}: {}".format(fid, e))
-                if video_success and audio_success:
-                    url = dash_builder.start_httpd(builder.emit())
-                    isa = True
-                    headers = f.get('http_headers')
-                    log("Picked DASH with custom manifest")
-                    break
 
-            # Non-adaptive manifests or files on servers:
-            if not 'url' in f:
-                continue
-            
-            # Allow direct playback of video files even if audio/video codec info is missing
-            # This is common for direct MP4 links
-            if (have_video and vcodec == "none") or (have_audio and acodec == "none"):
-                # Check if it's a direct video file, if so, we might want to allow it
-                # Also check if the container is explicitly set to a video format
-                is_video_file = any(f['url'].lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm'])
-                is_video_container = f.get('container') in ['mp4', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'webm']
-                
-                if not (is_video_file or is_video_container):
-                     continue
+def sanitize_url(url):
+    """
+    Clean and prepare URL for playback
+    
+    Args:
+        url: Raw URL string
+    
+    Returns:
+        str: Sanitized URL
+    """
+    # Remove leading/trailing whitespace
+    url = url.strip()
+    
+    # Auto-convert Nextcloud share URLs
+    url = convert_nextcloud_to_direct(url)
+    
+    # Convert WebDAV to HTTPS
+    url = convert_webdav_to_https(url)
+    
+    return url
 
-            manifest_type = guess_manifest_type(f, f['url'])
-            if manifest_type is not None and not isa_supports(manifest_type):
-                continue
-            width = f.get('width', 0)
-            if width is not None and width > maxwidth:
-                if filtered_format is None:
-                    filtered_format = f
-                continue
-            url = f['url']
-            isa = isa_supports(manifest_type)
-            headers = f.get('http_headers')
-            log("Picked raw format " + f.get('format', ""))
-            break
 
-        # if nothing could be selected, try playing anything we can
-        if url is None and filtered_format is not None:
-            url = filtered_format['url']
-            isa = isa_supports(guess_manifest_type(filtered_format, url))
-            headers = f.get('http_headers')
+# ============================================================
+# LISTITEM CREATION
+# ============================================================
 
-    if url is None:
-        # yeah we're definitely cooked
-        url = result.get('url')
-        if url is not None:
-            isa = isa_supports(guess_manifest_type(result, url))
-            headers = result.get('http_headers')
-
-    if url is None:
-        msg = "No supported streams found"
-        showErrorNotification(msg)
-        raise Exception("Error: " + msg)
-
-    log("creating list item for url {}".format(url))
-    list_item = xbmcgui.ListItem(result['title'], path=url)
-    video_info = list_item.getVideoInfoTag()
-    video_info.setTitle(result['title'])
-    video_info.setPlot(result.get('description', None))
-    if result.get('thumbnail', None) is not None:
-        list_item.setArt({'thumb': result['thumbnail']})
-    subtitles = result.get('subtitles', {})
-    if subtitles:
-        list_item.setSubtitles([
-            subtitleListEntry['url']
-            for lang in subtitles
-            for subtitleListEntry in subtitles[lang]
-        ])
-    if isa:
-        list_item.setProperty('inputstream', 'inputstream.adaptive')
-
-        # Many sites will throw a 403 unless the http headers (e.g. user agent and referer)
-        # sent when downloading a manifest and streaming match those originally sent by yt-dlp.
-        if headers is None:
-            headers = result.get('http_headers')
-        if headers is not None:
-            headers = urlencode(headers)
-            list_item.setProperty('inputstream.adaptive.manifest_headers', headers)
-            list_item.setProperty('inputstream.adaptive.stream_headers', headers)
-
-    return list_item
-
-def createListItemFromFlatPlaylistItem(video, plugin_url):
-    listItemUrl = plugin_url + "?" + video['url']
-    title = video['title'] if 'title' in video else video['url']
-
-    # add the extra parameters to every playlist item
-    paramstring = sys.argv[2]
-    additionalParamsIndex = paramstring.find(' ')
-    if additionalParamsIndex != -1:
-        additionalParamsString = paramstring[additionalParamsIndex:]
-        listItemUrl = listItemUrl + " " + additionalParamsString
-
-    listItem = xbmcgui.ListItem(
-        path            = listItemUrl,
-        label           = title
-    )
-
-    video_info = listItem.getVideoInfoTag()
-    video_info.setTitle(title)
-
-    # both `true` and `false` are recommended here...
-    listItem.setProperty("IsPlayable","true")
-
-    return listItem
-
-# get the index of the first video to be played in the submitted playlist url
-def playlistIndex(url, playlist):
-
-    query = urlparse(url).query
-    queryParams = parse_qs(query)
-
-    if 'v' not in queryParams:
-        return None
-
-    v = queryParams['v'][0]
-
-    try:
-        # youtube playlist indices start at 1
-        index = int(queryParams.get('index')[0]) - 1
-        if playlist['entries'][index]['id'] == v:
-            return index
-    except:
-        pass
-
-    for i, entry in enumerate(playlist['entries']):
-        if entry['id'] == v:
-            return i
-
+def get_mime_type(url):
+    """
+    Determine MIME type from URL
+    
+    Args:
+        url: URL string
+    
+    Returns:
+        str: MIME type or None
+    """
+    url_lower = url.lower()
+    
+    # Video MIME types
+    mime_map = {
+        '.mp4': 'video/mp4',
+        '.m4v': 'video/mp4',
+        '.mkv': 'video/x-matroska',
+        '.avi': 'video/x-msvideo',
+        '.mov': 'video/quicktime',
+        '.wmv': 'video/x-ms-wmv',
+        '.flv': 'video/x-flv',
+        '.webm': 'video/webm',
+        '.mpg': 'video/mpeg',
+        '.mpeg': 'video/mpeg',
+        '.m3u8': 'application/vnd.apple.mpegurl',
+        '.mpd': 'application/dash+xml',
+        # Audio MIME types
+        '.mp3': 'audio/mpeg',
+        '.flac': 'audio/flac',
+        '.wav': 'audio/wav',
+        '.aac': 'audio/aac',
+        '.m4a': 'audio/mp4',
+        '.ogg': 'audio/ogg',
+        '.opus': 'audio/opus',
+    }
+    
+    for ext, mime in mime_map.items():
+        if url_lower.endswith(ext):
+            return mime
+    
     return None
 
-def run():
-    # Early Exit
-    if len(sys.argv) < 3 or not sys.argv[2]:
-        xbmcaddon.Addon().openSettings()
-        return
 
-    # Setup variables
-    plugin_url = sys.argv[0]
-    handle = int(sys.argv[1])
+def create_direct_media_listitem(url):
+    """
+    Create ListItem for direct media URL with full seeking support
+    
+    Args:
+        url: Direct media URL
+    
+    Returns:
+        xbmcgui.ListItem: Configured ListItem for playback
+    """
+    log(f"Creating direct media ListItem")
+    
+    # Create ListItem with URL as path
+    list_item = xbmcgui.ListItem(path=url)
+    list_item.setProperty('IsPlayable', 'true')
+    
+    # Disable content lookup for direct URLs (improves performance)
+    list_item.setContentLookup(False)
+    
+    url_lower = url.lower()
+    
+    # ===== HLS Streaming (.m3u8) =====
+    if url_lower.endswith('.m3u8') or 'master.m3u8' in url_lower or 'playlist.m3u8' in url_lower:
+        log("Configuring for HLS stream")
+        list_item.setProperty('inputstream', 'inputstream.adaptive')
+        list_item.setProperty('inputstream.adaptive.manifest_type', 'hls')
+        
+        # Set MIME type
+        mime_type = 'application/vnd.apple.mpegurl'
+        list_item.setMimeType(mime_type)
+        
+        # Enable seeking for HLS if possible
+        list_item.setProperty('inputstream.adaptive.manifest_update_parameter', 'full')
+        log(f"HLS stream configured with MIME type: {mime_type}")
+    
+    # ===== DASH Streaming (.mpd) =====
+    elif url_lower.endswith('.mpd') or 'manifest.mpd' in url_lower:
+        log("Configuring for DASH stream")
+        list_item.setProperty('inputstream', 'inputstream.adaptive')
+        list_item.setProperty('inputstream.adaptive.manifest_type', 'mpd')
+        
+        # Set MIME type
+        mime_type = 'application/dash+xml'
+        list_item.setMimeType(mime_type)
+        log(f"DASH stream configured with MIME type: {mime_type}")
+    
+    # ===== Standard Media Files =====
+    else:
+        # Get and set MIME type
+        mime_type = get_mime_type(url)
+        if mime_type:
+            list_item.setMimeType(mime_type)
+            log(f"Set MIME type: {mime_type}")
+        
+        # CRITICAL: Enable seeking for standard media files
+        # This tells Kodi to use HTTP range requests
+        list_item.setProperty('seekable', 'true')
+        
+        # Additional property for HTTP seeking
+        list_item.setProperty('http-seekable', 'true')
+        
+        log("Enabled seeking properties for standard media file")
+    
+    return list_item
 
-    # Dynamic Path Injection
-    dir_path = os.path.dirname(os.path.realpath(__file__))
-    lib_path = os.path.join(dir_path, 'lib')
-    sys.path.insert(0, lib_path)
 
-    original_stderr_class = sys.stderr.__class__
+# ============================================================
+# YT-DLP INTEGRATION
+# ============================================================
 
+def get_ytdlp_module():
+    """
+    Import and return yt-dlp or youtube-dl module
+    
+    Returns:
+        module: YoutubeDL class or None
+    """
     try:
-        # Apply stderr patch
-        sys.stderr.__class__ = replacement_stderr
-        
-        # Patch strptime
-        patch_strptime()
-
-        # Conditional Imports
-        if xbmcplugin.getSetting(handle, "resolver") == "0" or sys.version_info[0] == 2:
-            from youtube_dl import YoutubeDL
+        # Try yt-dlp first (Python 3.6+)
+        if sys.version_info[0] >= 3 and sys.version_info[1] >= 6:
+            from lib.yt_dlp import YoutubeDL
+            log("Using yt-dlp resolver")
+            return YoutubeDL
         else:
-            from yt_dlp import YoutubeDL
+            # Fallback to youtube-dl for older Python
+            from lib.youtube_dl import YoutubeDL
+            log("Using youtube-dl resolver (legacy)")
+            return YoutubeDL
+    except ImportError as e:
+        log_error(f"Failed to import resolver: {e}")
+        return None
 
-        # Main Logic
-        ydl_opts = {'extract_flat': 'in_playlist'}
-        params = getParams()
-        url = str(params['url'])
-        ydl_opts.update(params['ydlOpts'])
 
-        usemanifest = xbmcplugin.getSetting(handle, "usemanifest") == 'true'
-        usedashbuilder = xbmcplugin.getSetting(handle, "usedashbuilder") == 'true'
-        maxwidth = int(xbmcplugin.getSetting(handle, "maxresolution"))
+def get_ytdlp_options():
+    """
+    Get yt-dlp extraction options
+    
+    Returns:
+        dict: yt-dlp options
+    """
+    return {
+        'quiet': True,
+        'no_warnings': True,
+        'ignoreerrors': False,
+        'nocheckcertificate': True,
+        'format': 'best',
+    }
 
-        ydl = YoutubeDL(ydl_opts)
-        ydl.add_default_info_extractors()
 
-        with ydl:
-            progress = xbmcgui.DialogProgressBG()
-            progress.create("Resolving " + url)
-            try:
-                result = ydl.extract_info(url, download=False)
-            except:
-                progress.close()
-                showErrorNotification("Could not resolve the url, check the log for more info")
-                log(msg=traceback.format_exc(), level=xbmc.LOGERROR)
-                return # Exit run
-            progress.close()
-
-        if 'entries' in result:
-            # more than one video
-            pl = xbmc.PlayList(1)
-            pl.clear()
-
-            # determine which index in the queue to start playing from
-            indexToStartAt = playlistIndex(url, result)
-            if indexToStartAt == None:
-                indexToStartAt = 0
-
-            unresolvedEntries = list(result['entries'])
-            startingEntry = unresolvedEntries.pop(indexToStartAt)
-
-            # populate the queue with unresolved entries so that the starting entry can be inserted
-            for video in unresolvedEntries:
-                if 'url' in video:
-                    list_item = createListItemFromFlatPlaylistItem(video, plugin_url)
-                    pl.add(list_item.getPath(), list_item)
-
-            # make sure the starting ListItem has a resolved url, to avoid recursion and crashes
-            if 'url' in startingEntry:
-                startingItem = createListItemFromVideo(ydl.extract_info(startingEntry['url'], download=False), usemanifest, usedashbuilder, maxwidth)
+def extract_with_ytdlp(url):
+    """
+    Extract video information using yt-dlp
+    
+    Args:
+        url: URL to extract
+    
+    Returns:
+        dict: Video information or None
+    """
+    YoutubeDL = get_ytdlp_module()
+    if not YoutubeDL:
+        log_error("No resolver available (yt-dlp or youtube-dl)")
+        return None
+    
+    try:
+        log(f"Extracting URL with yt-dlp")
+        
+        ydl_opts = get_ytdlp_options()
+        
+        with YoutubeDL(ydl_opts) as ydl:
+            result = ydl.extract_info(url, download=False)
+            
+            if result:
+                log("Successfully extracted video information")
+                return result
             else:
-                startingItem = createListItemFromVideo(startingEntry, usemanifest, usedashbuilder, maxwidth)
-            pl.add(startingItem.getPath(), startingItem, indexToStartAt)
+                log_error("yt-dlp returned empty result")
+                return None
+                
+    except Exception as e:
+        log_error(f"yt-dlp extraction failed: {e}")
+        return None
 
-            #xbmc.Player().play(pl) # this probably works again
-            # ...but start playback the same way the Youtube plugin does it:
-            xbmc.executebuiltin('Playlist.PlayOffset(%s,%d)' % ('video', indexToStartAt))
-        else:
-            # Just a video, pass the item to the Kodi player.
-            xbmcplugin.setResolvedUrl(handle, True, listitem=createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth))
 
-    finally:
-        # Robust Cleanup
-        if lib_path in sys.path:
-            sys.path.remove(lib_path)
+def create_listitem_from_ytdlp(result):
+    """
+    Create ListItem from yt-dlp extraction result
+    
+    Args:
+        result: yt-dlp extraction result dict
+    
+    Returns:
+        xbmcgui.ListItem: Configured ListItem or None
+    """
+    try:
+        # Check if result has formats
+        if 'formats' not in result and 'url' not in result:
+            log_error("No playable formats found in yt-dlp result")
+            return None
         
-        # Restore stderr
-        sys.stderr.__class__ = original_stderr_class
+        # Get best format URL
+        if 'url' in result:
+            url = result['url']
+        elif 'formats' in result and len(result['formats']) > 0:
+            # Get the last format (usually best quality)
+            url = result['formats'][-1]['url']
+        else:
+            log_error("Could not find URL in yt-dlp result")
+            return None
+        
+        log(f"Creating ListItem from yt-dlp result")
+        
+        # Create ListItem
+        list_item = xbmcgui.ListItem(path=url)
+        list_item.setProperty('IsPlayable', 'true')
+        
+        # Add metadata if available
+        if 'title' in result:
+            list_item.setInfo('video', {'title': result['title']})
+        
+        # Check if we need inputstream.adaptive for manifest
+        if url.endswith('.m3u8'):
+            list_item.setProperty('inputstream', 'inputstream.adaptive')
+            list_item.setProperty('inputstream.adaptive.manifest_type', 'hls')
+        elif url.endswith('.mpd'):
+            list_item.setProperty('inputstream', 'inputstream.adaptive')
+            list_item.setProperty('inputstream.adaptive.manifest_type', 'mpd')
+        
+        return list_item
+        
+    except Exception as e:
+        log_error(f"Error creating ListItem from yt-dlp result: {e}")
+        return None
+
+
+# ============================================================
+# MAIN PROCESSING
+# ============================================================
+
+def process_url(url):
+    """
+    Main URL processing function
+    
+    Args:
+        url: URL to process
+    
+    Returns:
+        xbmcgui.ListItem: ListItem ready for playback or None
+    """
+    # Sanitize URL
+    url = sanitize_url(url)
+    log(f"Processing URL: {url}")
+    
+    # Check if this is a direct media file
+    if is_direct_media_url(url):
+        log("Direct media URL detected - bypassing yt-dlp")
+        
+        try:
+            listitem = create_direct_media_listitem(url)
+            showInfoNotification("Playing direct media")
+            return listitem
+            
+        except Exception as e:
+            log_error(f"Error creating direct media ListItem: {e}")
+            showErrorNotification("Failed to play direct media")
+            return None
+    
+    # Not a direct media file - use yt-dlp
+    else:
+        log("Using yt-dlp to resolve URL")
+        
+        try:
+            result = extract_with_ytdlp(url)
+            
+            if result:
+                listitem = create_listitem_from_ytdlp(result)
+                
+                if listitem:
+                    showInfoNotification("Playing stream")
+                    return listitem
+                else:
+                    log_error("Failed to create ListItem from yt-dlp result")
+                    showErrorNotification("Failed to create playback item")
+                    return None
+            else:
+                log_error("yt-dlp failed to extract URL")
+                showErrorNotification("Failed to resolve URL")
+                return None
+                
+        except Exception as e:
+            log_error(f"Error processing with yt-dlp: {e}")
+            showErrorNotification(f"Error: {str(e)}")
+            return None
+
+
+# ============================================================
+# PLUGIN ENTRY POINT
+# ============================================================
 
 if __name__ == '__main__':
-    run()
+    try:
+        log("=" * 60)
+        log("SendToKodi service started")
+        
+        # Get URL from plugin arguments
+        if len(sys.argv) < 3:
+            log_error("No URL provided")
+            showErrorNotification("No URL provided")
+            xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
+            sys.exit(1)
+        
+        # Extract URL (remove leading '?')
+        url = sys.argv[2][1:] if sys.argv[2].startswith('?') else sys.argv[2]
+        
+        if not url:
+            log_error("Empty URL")
+            showErrorNotification("Empty URL")
+            xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
+            sys.exit(1)
+        
+        log(f"Received URL: {url[:100]}...")  # Log first 100 chars
+        
+        # Process the URL
+        listitem = process_url(url)
+        
+        # Resolve for playback
+        if listitem:
+            log("Successfully created ListItem - starting playback")
+            xbmcplugin.setResolvedUrl(__handle__, True, listitem=listitem)
+            log("Playback started successfully")
+        else:
+            log_error("Failed to create ListItem")
+            xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
+        
+        log("SendToKodi service finished")
+        log("=" * 60)
+        
+    except Exception as e:
+        log_error(f"Fatal error in main: {e}")
+        import traceback
+        log_error(traceback.format_exc())
+        showErrorNotification(f"Fatal error: {str(e)}")
+        xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
