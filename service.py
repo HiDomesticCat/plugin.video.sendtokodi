@@ -188,7 +188,11 @@ def createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth):
             # This is common for direct MP4 links
             if (have_video and vcodec == "none") or (have_audio and acodec == "none"):
                 # Check if it's a direct video file, if so, we might want to allow it
-                if not any(f['url'].lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm']):
+                # Also check if the container is explicitly set to a video format
+                is_video_file = any(f['url'].lower().endswith(ext) for ext in ['.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm'])
+                is_video_container = f.get('container') in ['mp4', 'mkv', 'avi', 'mov', 'flv', 'wmv', 'webm']
+                
+                if not (is_video_file or is_video_container):
                      continue
 
             manifest_type = guess_manifest_type(f, f['url'])
