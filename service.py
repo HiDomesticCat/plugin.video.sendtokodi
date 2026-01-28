@@ -1,73 +1,48 @@
 # -*- coding: utf-8 -*-
 import sys
 import os
-
-# Ensures yt-dlp is on the python path
-# Workaround for issue caused by upstream commit
-dir_path = os.path.dirname(os.path.realpath(__file__))
-sys.path.append(os.path.join(dir_path, 'lib'))
-
 import json
-import sys
 import xbmc
 import xbmcaddon
 import xbmcgui
 import xbmcplugin
-
 from urllib.parse import urlparse, parse_qs, urlencode
+import traceback
 
 class replacement_stderr(sys.stderr.__class__):
     def isatty(self): return False
 
-sys.stderr.__class__ = replacement_stderr
-
 def debug(content):
     log(content, xbmc.LOGDEBUG)
 
-
 def notice(content):
     log(content, xbmc.LOGINFO)
-
 
 def log(msg, level=xbmc.LOGINFO):
     addon = xbmcaddon.Addon()
     addonID = addon.getAddonInfo('id')
     xbmc.log('%s: %s' % (addonID, msg), level)
 
-
-# python embedded (as used in kodi) has a known bug for second calls of strptime.
-# The python bug is docmumented here https://bugs.python.org/issue27400
-# The following workaround patch is borrowed from https://forum.kodi.tv/showthread.php?tid=112916&pid=2914578#pid2914578
 def patch_strptime():
     import datetime
-
     #fix for datatetime.strptime returns None
     class proxydt(datetime.datetime):
         @staticmethod
         def strptime(date_string, format):
             import time
             return datetime.datetime(*(time.strptime(date_string, format)[0:6]))
-
     datetime.datetime = proxydt
-
 
 def showInfoNotification(message):
     xbmcgui.Dialog().notification("SendToKodi", message, xbmcgui.NOTIFICATION_INFO, 5000)
 
-
 def showErrorNotification(message):
-    xbmcgui.Dialog().notification("SendToKodi", message,
-                                  xbmcgui.NOTIFICATION_ERROR, 5000)
-
-
-# Get the plugin url in plugin:// notation.
-__url__ = sys.argv[0]
-# Get the plugin handle as an integer number.
-__handle__ = int(sys.argv[1])
-
+    xbmcgui.Dialog().notification("SendToKodi", message, xbmcgui.NOTIFICATION_ERROR, 5000)
 
 def getParams():
     result = {}
+    if len(sys.argv) < 3:
+        return result
     paramstring = sys.argv[2]
     additionalParamsIndex = paramstring.find(' ')
     if additionalParamsIndex == -1:
@@ -79,7 +54,6 @@ def getParams():
         additionalParams = json.loads(additionalParamsString)
         result['ydlOpts'] = additionalParams['ydlOpts']
     return result
-
 
 def guess_manifest_type(f, url):
     protocol = f.get('protocol', "")
@@ -99,18 +73,16 @@ def guess_manifest_type(f, url):
             offset = url.find(s, offset + 1)
     return None
 
-try:
-    import inputstreamhelper
-
-    def isa_supports(stream):
+def isa_supports(stream):
+    try:
+        import inputstreamhelper
         if stream is None or len(stream) < 1:
             return False
         return inputstreamhelper.Helper(stream).check_inputstream()
-except ImportError:
-    def isa_supports(stream):
+    except ImportError:
         return False
 
-def createListItemFromVideo(result):
+def createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth):
     debug(result)
 
     url = None
@@ -268,8 +240,8 @@ def createListItemFromVideo(result):
 
     return list_item
 
-def createListItemFromFlatPlaylistItem(video):
-    listItemUrl = __url__ + "?" + video['url']
+def createListItemFromFlatPlaylistItem(video, plugin_url):
+    listItemUrl = plugin_url + "?" + video['url']
     title = video['title'] if 'title' in video else video['url']
 
     # add the extra parameters to every playlist item
@@ -317,80 +289,101 @@ def playlistIndex(url, playlist):
 
     return None
 
-# Open the settings if no parameters have been passed. Prevents crash.
-# This happens when the addon is launched from within the Kodi OSD.
-if not sys.argv[2]:
-    xbmcaddon.Addon().openSettings()
-    exit()
+def run():
+    # Early Exit
+    if len(sys.argv) < 3 or not sys.argv[2]:
+        xbmcaddon.Addon().openSettings()
+        return
 
-# Use the chosen resolver while forcing to use youtube_dl on legacy python 2 systems (dlp is python 3.6+)
-if xbmcplugin.getSetting(int(sys.argv[1]),"resolver") == "0" or sys.version_info[0] == 2:
-    from youtube_dl import YoutubeDL
-else:
-   # import lib.yt_dlp as yt_dlp
-    from yt_dlp import YoutubeDL
+    # Setup variables
+    plugin_url = sys.argv[0]
+    handle = int(sys.argv[1])
 
-# patch broken strptime (see above)
-patch_strptime()
+    # Dynamic Path Injection
+    dir_path = os.path.dirname(os.path.realpath(__file__))
+    lib_path = os.path.join(dir_path, 'lib')
+    sys.path.insert(0, lib_path)
 
-# extract_flat:  Do not resolve URLs, return the immediate result.
-#                Pass in 'in_playlist' to only show this behavior for
-#                playlist items.
-ydl_opts = {'extract_flat': 'in_playlist'}
+    original_stderr_class = sys.stderr.__class__
 
-params = getParams()
-url = str(params['url'])
-ydl_opts.update(params['ydlOpts'])
-
-usemanifest = xbmcplugin.getSetting(int(sys.argv[1]),"usemanifest") == 'true'
-usedashbuilder = xbmcplugin.getSetting(int(sys.argv[1]),"usedashbuilder") == 'true'
-maxwidth = int(xbmcplugin.getSetting(int(sys.argv[1]), "maxresolution"))
-
-ydl = YoutubeDL(ydl_opts)
-ydl.add_default_info_extractors()
-
-with ydl:
-    progress = xbmcgui.DialogProgressBG()
-    progress.create("Resolving " + url)
     try:
-        result = ydl.extract_info(url, download=False)
-    except:
-        progress.close()
-        showErrorNotification("Could not resolve the url, check the log for more info")
-        import traceback
-        log(msg=traceback.format_exc(), level=xbmc.LOGERROR)
-        exit()
-    progress.close()
+        # Apply stderr patch
+        sys.stderr.__class__ = replacement_stderr
+        
+        # Patch strptime
+        patch_strptime()
 
-if 'entries' in result:
-    # more than one video
-    pl = xbmc.PlayList(1)
-    pl.clear()
+        # Conditional Imports
+        if xbmcplugin.getSetting(handle, "resolver") == "0" or sys.version_info[0] == 2:
+            from youtube_dl import YoutubeDL
+        else:
+            from yt_dlp import YoutubeDL
 
-    # determine which index in the queue to start playing from
-    indexToStartAt = playlistIndex(url, result)
-    if indexToStartAt == None:
-        indexToStartAt = 0
+        # Main Logic
+        ydl_opts = {'extract_flat': 'in_playlist'}
+        params = getParams()
+        url = str(params['url'])
+        ydl_opts.update(params['ydlOpts'])
 
-    unresolvedEntries = list(result['entries'])
-    startingEntry = unresolvedEntries.pop(indexToStartAt)
+        usemanifest = xbmcplugin.getSetting(handle, "usemanifest") == 'true'
+        usedashbuilder = xbmcplugin.getSetting(handle, "usedashbuilder") == 'true'
+        maxwidth = int(xbmcplugin.getSetting(handle, "maxresolution"))
 
-    # populate the queue with unresolved entries so that the starting entry can be inserted
-    for video in unresolvedEntries:
-        if 'url' in video:
-            list_item = createListItemFromFlatPlaylistItem(video)
-            pl.add(list_item.getPath(), list_item)
+        ydl = YoutubeDL(ydl_opts)
+        ydl.add_default_info_extractors()
 
-    # make sure the starting ListItem has a resolved url, to avoid recursion and crashes
-    if 'url' in startingEntry:
-        startingItem = createListItemFromVideo(ydl.extract_info(startingEntry['url'], download=False))
-    else:
-        startingItem = createListItemFromVideo(startingEntry)
-    pl.add(startingItem.getPath(), startingItem, indexToStartAt)
+        with ydl:
+            progress = xbmcgui.DialogProgressBG()
+            progress.create("Resolving " + url)
+            try:
+                result = ydl.extract_info(url, download=False)
+            except:
+                progress.close()
+                showErrorNotification("Could not resolve the url, check the log for more info")
+                log(msg=traceback.format_exc(), level=xbmc.LOGERROR)
+                return # Exit run
+            progress.close()
 
-    #xbmc.Player().play(pl) # this probably works again
-    # ...but start playback the same way the Youtube plugin does it:
-    xbmc.executebuiltin('Playlist.PlayOffset(%s,%d)' % ('video', indexToStartAt))
-else:
-    # Just a video, pass the item to the Kodi player.
-    xbmcplugin.setResolvedUrl(__handle__, True, listitem=createListItemFromVideo(result))
+        if 'entries' in result:
+            # more than one video
+            pl = xbmc.PlayList(1)
+            pl.clear()
+
+            # determine which index in the queue to start playing from
+            indexToStartAt = playlistIndex(url, result)
+            if indexToStartAt == None:
+                indexToStartAt = 0
+
+            unresolvedEntries = list(result['entries'])
+            startingEntry = unresolvedEntries.pop(indexToStartAt)
+
+            # populate the queue with unresolved entries so that the starting entry can be inserted
+            for video in unresolvedEntries:
+                if 'url' in video:
+                    list_item = createListItemFromFlatPlaylistItem(video, plugin_url)
+                    pl.add(list_item.getPath(), list_item)
+
+            # make sure the starting ListItem has a resolved url, to avoid recursion and crashes
+            if 'url' in startingEntry:
+                startingItem = createListItemFromVideo(ydl.extract_info(startingEntry['url'], download=False), usemanifest, usedashbuilder, maxwidth)
+            else:
+                startingItem = createListItemFromVideo(startingEntry, usemanifest, usedashbuilder, maxwidth)
+            pl.add(startingItem.getPath(), startingItem, indexToStartAt)
+
+            #xbmc.Player().play(pl) # this probably works again
+            # ...but start playback the same way the Youtube plugin does it:
+            xbmc.executebuiltin('Playlist.PlayOffset(%s,%d)' % ('video', indexToStartAt))
+        else:
+            # Just a video, pass the item to the Kodi player.
+            xbmcplugin.setResolvedUrl(handle, True, listitem=createListItemFromVideo(result, usemanifest, usedashbuilder, maxwidth))
+
+    finally:
+        # Robust Cleanup
+        if lib_path in sys.path:
+            sys.path.remove(lib_path)
+        
+        # Restore stderr
+        sys.stderr.__class__ = original_stderr_class
+
+if __name__ == '__main__':
+    run()
