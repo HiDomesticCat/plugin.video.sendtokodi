@@ -1,16 +1,11 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """
-SendToKodi - Enhanced Service
-Plays various stream sites on Kodi using yt-dlp with direct media support
+SendToKodi - Universal Anti-Hotlink Protection
+Uses complete browser headers for ALL sites - no need for site-specific code!
 
-Features:
-- Direct media file support (mp4, mkv, avi, etc.)
-- Automatic Nextcloud share URL conversion
-- WebDAV protocol support
-- Improved seeking/fast-forward support
-- HLS and DASH manifest support
-- Fallback to yt-dlp for complex URLs
+Strategy: Simulate a real browser request for EVERY URL
+This works for most anti-hotlink protection systems
 """
 
 import sys
@@ -28,12 +23,9 @@ __handle__ = int(sys.argv[1])
 
 # Supported direct media file extensions
 DIRECT_MEDIA_EXTENSIONS = (
-    # Video formats
     '.mp4', '.mkv', '.avi', '.mov', '.flv', '.wmv', '.webm', '.m4v',
     '.mpg', '.mpeg', '.3gp', '.ogv', '.ts', '.vob',
-    # Audio formats
     '.mp3', '.flac', '.wav', '.aac', '.ogg', '.m4a', '.wma', '.opus',
-    # Streaming formats
     '.m3u8', '.mpd'
 )
 
@@ -69,28 +61,19 @@ def showErrorNotification(message):
 # ============================================================
 
 def is_direct_media_url(url):
-    """
-    Detect if URL is a direct media file
-    
-    Args:
-        url: URL string to check
-    
-    Returns:
-        bool: True if URL points to a playable media file
-    """
+    """Detect if URL is a direct media file"""
     try:
-        parsed = urlparse(url)
+        url_base = url.split('|')[0] if '|' in url else url
+        parsed = urlparse(url_base)
         path = unquote(parsed.path.lower())
         
-        # Check file extension in path
         for ext in DIRECT_MEDIA_EXTENSIONS:
             if path.endswith(ext):
                 log(f"Detected direct media file: {ext}")
                 return True
         
-        # Check file extension before query parameters
-        if '?' in url:
-            base_path = url.split('?')[0].lower()
+        if '?' in url_base:
+            base_path = url_base.split('?')[0].lower()
             for ext in DIRECT_MEDIA_EXTENSIONS:
                 if base_path.endswith(ext):
                     log(f"Detected direct media file in URL: {ext}")
@@ -103,45 +86,17 @@ def is_direct_media_url(url):
 
 
 def is_nextcloud_share_url(url):
-    """
-    Detect Nextcloud share URLs
-    
-    Args:
-        url: URL string to check
-    
-    Returns:
-        bool: True if URL is a Nextcloud share link
-    """
+    """Detect Nextcloud share URLs"""
     return '/s/' in url and '/download' not in url and '/preview' not in url
 
 
 def is_webdav_url(url):
-    """
-    Detect WebDAV URLs
-    
-    Args:
-        url: URL string to check
-    
-    Returns:
-        bool: True if URL uses WebDAV protocol
-    """
+    """Detect WebDAV URLs"""
     return url.startswith('webdav://') or url.startswith('webdavs://')
 
 
 def convert_nextcloud_to_direct(url):
-    """
-    Convert Nextcloud share URL to direct download URL
-    
-    Args:
-        url: Nextcloud share URL
-    
-    Returns:
-        str: Direct download URL
-    
-    Example:
-        Input:  https://cloud.example.com/s/ABC123
-        Output: https://cloud.example.com/s/ABC123/download
-    """
+    """Convert Nextcloud share URL to direct download URL"""
     if is_nextcloud_share_url(url):
         direct_url = url.rstrip('/') + '/download'
         log(f"Converted Nextcloud URL to direct download")
@@ -150,19 +105,7 @@ def convert_nextcloud_to_direct(url):
 
 
 def convert_webdav_to_https(url):
-    """
-    Convert WebDAV URL to HTTPS URL for better compatibility
-    
-    Args:
-        url: WebDAV URL
-    
-    Returns:
-        str: HTTPS URL
-    
-    Example:
-        Input:  webdav://user:pass@host/path
-        Output: https://user:pass@host/path
-    """
+    """Convert WebDAV URL to HTTPS URL"""
     if url.startswith('webdav://'):
         https_url = url.replace('webdav://', 'https://', 1)
         log("Converted WebDAV to HTTPS")
@@ -174,25 +117,66 @@ def convert_webdav_to_https(url):
     return url
 
 
+def get_universal_headers(url):
+    """
+    UNIVERSAL ANTI-HOTLINK SOLUTION
+    
+    Generate complete browser headers for ANY URL
+    This simulates a real browser request and works for most anti-hotlink systems
+    
+    No need to add site-specific code anymore!
+    """
+    url_base = url.split('|')[0] if '|' in url else url
+    parsed = urlparse(url_base)
+    domain = parsed.netloc.lower()
+    scheme = parsed.scheme
+    
+    # Complete browser headers - works for most sites
+    headers = {
+        # Browser identification
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        
+        # Content negotiation
+        'Accept': 'video/webm,video/ogg,video/*;q=0.9,application/ogg;q=0.7,audio/*;q=0.6,*/*;q=0.5',
+        'Accept-Language': 'en-US,en;q=0.9,zh-TW;q=0.8,zh;q=0.7,ja;q=0.6',
+        'Accept-Encoding': 'gzip, deflate, br',
+        
+        # Connection management
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        
+        # Security context (modern browsers)
+        'Sec-Fetch-Dest': 'video',
+        'Sec-Fetch-Mode': 'no-cors',
+        'Sec-Fetch-Site': 'same-origin',
+        
+        # DNT (Do Not Track)
+        'DNT': '1',
+        
+        # Cache control
+        'Cache-Control': 'no-cache',
+        'Pragma': 'no-cache',
+    }
+    
+    # Add Referer and Origin for anti-hotlink protection
+    # Use the same domain as the video URL - this is the KEY!
+    if domain:
+        base_url = f"{scheme}://{domain}/"
+        headers['Referer'] = base_url
+        headers['Origin'] = base_url.rstrip('/')
+        log(f"Using universal headers with Referer: {base_url}")
+    
+    # Format headers for Kodi URL format: url|Header1=value1&Header2=value2
+    header_str = '&'.join([f'{k}={v}' for k, v in headers.items()])
+    
+    return header_str
+
+
 def sanitize_url(url):
-    """
-    Clean and prepare URL for playback
-    
-    Args:
-        url: Raw URL string
-    
-    Returns:
-        str: Sanitized URL
-    """
-    # Remove leading/trailing whitespace
+    """Clean and prepare URL for playback"""
     url = url.strip()
-    
-    # Auto-convert Nextcloud share URLs
     url = convert_nextcloud_to_direct(url)
-    
-    # Convert WebDAV to HTTPS
     url = convert_webdav_to_https(url)
-    
     return url
 
 
@@ -201,18 +185,9 @@ def sanitize_url(url):
 # ============================================================
 
 def get_mime_type(url):
-    """
-    Determine MIME type from URL
+    """Determine MIME type from URL"""
+    url_lower = url.lower().split('|')[0]
     
-    Args:
-        url: URL string
-    
-    Returns:
-        str: MIME type or None
-    """
-    url_lower = url.lower()
-    
-    # Video MIME types
     mime_map = {
         '.mp4': 'video/mp4',
         '.m4v': 'video/mp4',
@@ -226,7 +201,6 @@ def get_mime_type(url):
         '.mpeg': 'video/mpeg',
         '.m3u8': 'application/vnd.apple.mpegurl',
         '.mpd': 'application/dash+xml',
-        # Audio MIME types
         '.mp3': 'audio/mpeg',
         '.flac': 'audio/flac',
         '.wav': 'audio/wav',
@@ -245,66 +219,56 @@ def get_mime_type(url):
 
 def create_direct_media_listitem(url):
     """
-    Create ListItem for direct media URL with full seeking support
+    Create ListItem for direct media URL with UNIVERSAL anti-hotlink protection
     
-    Args:
-        url: Direct media URL
-    
-    Returns:
-        xbmcgui.ListItem: Configured ListItem for playback
+    This now works for ALL websites automatically!
     """
-    log(f"Creating direct media ListItem")
+    log(f"Creating direct media ListItem with universal headers")
     
-    # Create ListItem with URL as path
-    list_item = xbmcgui.ListItem(path=url)
+    # Add universal browser headers (works for all sites!)
+    if '|' not in url:
+        headers = get_universal_headers(url)
+        url_with_headers = f"{url}|{headers}"
+        log("Applied universal anti-hotlink headers")
+    else:
+        url_with_headers = url
+        log("URL already contains headers")
+    
+    # Create ListItem
+    list_item = xbmcgui.ListItem(path=url_with_headers)
     list_item.setProperty('IsPlayable', 'true')
-    
-    # Disable content lookup for direct URLs (improves performance)
     list_item.setContentLookup(False)
     
-    url_lower = url.lower()
+    # Get base URL for format detection
+    url_base = url.split('|')[0]
+    url_lower = url_base.lower()
     
-    # ===== HLS Streaming (.m3u8) =====
+    # HLS Streaming
     if url_lower.endswith('.m3u8') or 'master.m3u8' in url_lower or 'playlist.m3u8' in url_lower:
         log("Configuring for HLS stream")
         list_item.setProperty('inputstream', 'inputstream.adaptive')
         list_item.setProperty('inputstream.adaptive.manifest_type', 'hls')
-        
-        # Set MIME type
-        mime_type = 'application/vnd.apple.mpegurl'
-        list_item.setMimeType(mime_type)
-        
-        # Enable seeking for HLS if possible
+        list_item.setMimeType('application/vnd.apple.mpegurl')
         list_item.setProperty('inputstream.adaptive.manifest_update_parameter', 'full')
-        log(f"HLS stream configured with MIME type: {mime_type}")
     
-    # ===== DASH Streaming (.mpd) =====
+    # DASH Streaming
     elif url_lower.endswith('.mpd') or 'manifest.mpd' in url_lower:
         log("Configuring for DASH stream")
         list_item.setProperty('inputstream', 'inputstream.adaptive')
         list_item.setProperty('inputstream.adaptive.manifest_type', 'mpd')
-        
-        # Set MIME type
-        mime_type = 'application/dash+xml'
-        list_item.setMimeType(mime_type)
-        log(f"DASH stream configured with MIME type: {mime_type}")
+        list_item.setMimeType('application/dash+xml')
     
-    # ===== Standard Media Files =====
+    # Standard Media Files
     else:
-        # Get and set MIME type
-        mime_type = get_mime_type(url)
+        mime_type = get_mime_type(url_base)
         if mime_type:
             list_item.setMimeType(mime_type)
             log(f"Set MIME type: {mime_type}")
         
-        # CRITICAL: Enable seeking for standard media files
-        # This tells Kodi to use HTTP range requests
+        # Enable seeking
         list_item.setProperty('seekable', 'true')
-        
-        # Additional property for HTTP seeking
         list_item.setProperty('http-seekable', 'true')
-        
-        log("Enabled seeking properties for standard media file")
+        log("Enabled seeking properties")
     
     return list_item
 
@@ -314,20 +278,13 @@ def create_direct_media_listitem(url):
 # ============================================================
 
 def get_ytdlp_module():
-    """
-    Import and return yt-dlp or youtube-dl module
-    
-    Returns:
-        module: YoutubeDL class or None
-    """
+    """Import and return yt-dlp or youtube-dl module"""
     try:
-        # Try yt-dlp first (Python 3.6+)
         if sys.version_info[0] >= 3 and sys.version_info[1] >= 6:
             from lib.yt_dlp import YoutubeDL
             log("Using yt-dlp resolver")
             return YoutubeDL
         else:
-            # Fallback to youtube-dl for older Python
             from lib.youtube_dl import YoutubeDL
             log("Using youtube-dl resolver (legacy)")
             return YoutubeDL
@@ -337,12 +294,7 @@ def get_ytdlp_module():
 
 
 def get_ytdlp_options():
-    """
-    Get yt-dlp extraction options
-    
-    Returns:
-        dict: yt-dlp options
-    """
+    """Get yt-dlp extraction options"""
     return {
         'quiet': True,
         'no_warnings': True,
@@ -353,23 +305,14 @@ def get_ytdlp_options():
 
 
 def extract_with_ytdlp(url):
-    """
-    Extract video information using yt-dlp
-    
-    Args:
-        url: URL to extract
-    
-    Returns:
-        dict: Video information or None
-    """
+    """Extract video information using yt-dlp"""
     YoutubeDL = get_ytdlp_module()
     if not YoutubeDL:
-        log_error("No resolver available (yt-dlp or youtube-dl)")
+        log_error("No resolver available")
         return None
     
     try:
         log(f"Extracting URL with yt-dlp")
-        
         ydl_opts = get_ytdlp_options()
         
         with YoutubeDL(ydl_opts) as ydl:
@@ -388,42 +331,28 @@ def extract_with_ytdlp(url):
 
 
 def create_listitem_from_ytdlp(result):
-    """
-    Create ListItem from yt-dlp extraction result
-    
-    Args:
-        result: yt-dlp extraction result dict
-    
-    Returns:
-        xbmcgui.ListItem: Configured ListItem or None
-    """
+    """Create ListItem from yt-dlp extraction result"""
     try:
-        # Check if result has formats
         if 'formats' not in result and 'url' not in result:
-            log_error("No playable formats found in yt-dlp result")
+            log_error("No playable formats found")
             return None
         
-        # Get best format URL
         if 'url' in result:
             url = result['url']
         elif 'formats' in result and len(result['formats']) > 0:
-            # Get the last format (usually best quality)
             url = result['formats'][-1]['url']
         else:
-            log_error("Could not find URL in yt-dlp result")
+            log_error("Could not find URL in result")
             return None
         
         log(f"Creating ListItem from yt-dlp result")
         
-        # Create ListItem
         list_item = xbmcgui.ListItem(path=url)
         list_item.setProperty('IsPlayable', 'true')
         
-        # Add metadata if available
         if 'title' in result:
             list_item.setInfo('video', {'title': result['title']})
         
-        # Check if we need inputstream.adaptive for manifest
         if url.endswith('.m3u8'):
             list_item.setProperty('inputstream', 'inputstream.adaptive')
             list_item.setProperty('inputstream.adaptive.manifest_type', 'hls')
@@ -434,7 +363,7 @@ def create_listitem_from_ytdlp(result):
         return list_item
         
     except Exception as e:
-        log_error(f"Error creating ListItem from yt-dlp result: {e}")
+        log_error(f"Error creating ListItem: {e}")
         return None
 
 
@@ -443,22 +372,13 @@ def create_listitem_from_ytdlp(result):
 # ============================================================
 
 def process_url(url):
-    """
-    Main URL processing function
-    
-    Args:
-        url: URL to process
-    
-    Returns:
-        xbmcgui.ListItem: ListItem ready for playback or None
-    """
-    # Sanitize URL
+    """Main URL processing function"""
     url = sanitize_url(url)
-    log(f"Processing URL: {url}")
+    log(f"Processing URL: {url[:100]}...")
     
-    # Check if this is a direct media file
+    # Check if direct media file
     if is_direct_media_url(url):
-        log("Direct media URL detected - bypassing yt-dlp")
+        log("Direct media URL - using universal anti-hotlink protection")
         
         try:
             listitem = create_direct_media_listitem(url)
@@ -470,7 +390,7 @@ def process_url(url):
             showErrorNotification("Failed to play direct media")
             return None
     
-    # Not a direct media file - use yt-dlp
+    # Use yt-dlp for complex URLs
     else:
         log("Using yt-dlp to resolve URL")
         
@@ -505,16 +425,14 @@ def process_url(url):
 if __name__ == '__main__':
     try:
         log("=" * 60)
-        log("SendToKodi service started")
+        log("SendToKodi service started (Universal Anti-Hotlink)")
         
-        # Get URL from plugin arguments
         if len(sys.argv) < 3:
             log_error("No URL provided")
             showErrorNotification("No URL provided")
             xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
             sys.exit(1)
         
-        # Extract URL (remove leading '?')
         url = sys.argv[2][1:] if sys.argv[2].startswith('?') else sys.argv[2]
         
         if not url:
@@ -523,7 +441,7 @@ if __name__ == '__main__':
             xbmcplugin.setResolvedUrl(__handle__, False, xbmcgui.ListItem())
             sys.exit(1)
         
-        log(f"Received URL: {url[:100]}...")  # Log first 100 chars
+        log(f"Received URL: {url[:100]}...")
         
         # Process the URL
         listitem = process_url(url)
