@@ -8,8 +8,6 @@
   <extension point="xbmc.python.pluginsource" library="service.py">
       <provides>video</provides>
   </extension>
-  <!-- Export lib so that youtube-dl and yt-dlp can be accessed by other addons. -->
-  <extension point="xbmc.python.module" library="lib" />
   <extension point="xbmc.addon.metadata">
     <summary lang="en">SendToKodi</summary>
     <description lang="en">SendToKodi</description>
