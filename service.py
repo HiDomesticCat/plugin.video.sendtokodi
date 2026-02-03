@@ -19,7 +19,7 @@ __handle__ = int(sys.argv[1])
 
 # 加入 addon 資源路徑，讓 import yt_dlp 更容易成功
 addon_path = xbmcaddon.Addon().getAddonInfo('path')
-lib_path = os.path.join(addon_path, 'resources', 'lib')
+lib_path = os.path.join(addon_path, 'lib')
 sys.path.insert(0, lib_path)
 
 DIRECT_MEDIA_EXTENSIONS = (
